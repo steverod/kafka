@@ -37,6 +37,93 @@ import org.apache.zookeeper.KeeperException.NodeExistsException
 import scala.collection.JavaConverters._
 import scala.collection._
 
+// Generalization of service APIs used by the ReassignPartitionCommand class; allows override
+// with either ZK or AdminClient
+trait ReassignCommandService extends AutoCloseable {
+  def getBrokerIdsInCluster: Seq[Int]
+  def getBrokerMetadatas(rackAwareMode: RackAwareMode, brokerList : Option[Seq[Int]]) : Seq[BrokerMetadata]
+  def getBrokerConfig(broker : String) : Properties
+  def getTopicConfig(topic : String) : Properties
+  def setBrokerConfig(brokers : Seq[Int], config : Properties) : Unit
+  def setTopicConfig(topic : String, config : Properties) : Unit
+  def getPartitionsForTopics(topics : immutable.Set[String]) : Map[String, Seq[Int]]
+  def getReplicaLogDirsForTopics(topics : Map[TopicPartitionReplica, String]): Map[TopicPartitionReplica, ReplicaLogDirInfo]
+  def alterPartitionAssignment(topics: Map[TopicPartition, Seq[Int]], timeoutMs : Long) : Unit // XXX: Maybe not unit?
+  def alterReplicaLogDirs(topics : Map[TopicPartitionReplica, String], timeoutMs : Long) : Unit // XXX: Not unit
+  def getReplicaAssignmentForTopics(topics : immutable.Set[String]) : Map[TopicPartition, Seq[Int]]
+  def reassignInProgress: Boolean
+  def getOngoingReassignments: Map[TopicPartition, Seq[Int]]
+}
+
+case class AdminClientReassignCommandService  (adminClient : Admin) extends ReassignCommandService {
+  override def getBrokerIdsInCluster: Seq[Int] = ???
+
+  override def getBrokerMetadatas(rackAwareMode: RackAwareMode, brokerList: Option[Seq[Int]]): Seq[BrokerMetadata] = ???
+
+  override def getBrokerConfig(broker: String): Properties = ???
+
+  override def getTopicConfig(topic: String): Properties = ???
+
+  override def setBrokerConfig(brokers: Seq[Int], config: Properties): Unit = ???
+
+  override def setTopicConfig(topic: String, config: Properties): Unit = ???
+
+  override def getPartitionsForTopics(topics: immutable.Set[String]): Map[String, Seq[Int]] = ???
+
+  override def getReplicaLogDirsForTopics(topics : Map[TopicPartitionReplica, String]): Map[TopicPartitionReplica, ReplicaLogDirInfo] = ???
+
+  override def alterPartitionAssignment(topics: Map[TopicPartition, Seq[Int]], timeoutMs: Long): Unit = ???
+
+  override def alterReplicaLogDirs(topics: Map[TopicPartitionReplica, String], timeoutMs: Long): Unit = ???
+
+  override def getReplicaAssignmentForTopics(topics: immutable.Set[String]): Map[TopicPartition, Seq[Int]] = ???
+
+  override def reassignInProgress: Boolean = ???
+
+  override def getOngoingReassignments: Map[TopicPartition, Seq[Int]] = ???
+
+  override def close() : Unit = adminClient.close()
+}
+
+case class ZkClientReassignCommandService  (zkClient : KafkaZkClient) extends ReassignCommandService {
+  val adminZkClient = new AdminZkClient(zkClient)
+
+  override def getBrokerIdsInCluster: Seq[Int] = zkClient.getSortedBrokerList
+
+  override def getBrokerMetadatas(rackAwareMode: RackAwareMode, brokerList: Option[Seq[Int]]): Seq[BrokerMetadata] =
+    adminZkClient.getBrokerMetadatas(rackAwareMode, brokerList)
+
+  override def getBrokerConfig(broker: String): Properties = adminZkClient.fetchEntityConfig(ConfigType.Broker, broker)
+
+  override def getTopicConfig(topic: String): Properties = adminZkClient.fetchEntityConfig(ConfigType.Topic, topic)
+
+  override def setBrokerConfig(brokers: Seq[Int], config: Properties): Unit = adminZkClient.changeBrokerConfig(brokers, config)
+
+  override def setTopicConfig(topic: String, config: Properties): Unit = adminZkClient.changeTopicConfig(topic, config)
+
+  override def getPartitionsForTopics(topics: immutable.Set[String]): Map[String, Seq[Int]] = zkClient.getPartitionsForTopics(topics)
+
+  override def getReplicaLogDirsForTopics(topics : Map[TopicPartitionReplica, String]): Map[TopicPartitionReplica, ReplicaLogDirInfo] = {
+    throw new AdminCommandFailedException("bootstrap-server needs to be provided in order to reassign replica log directory")
+  }
+
+  override def alterPartitionAssignment(topics: Map[TopicPartition, Seq[Int]], timeoutMs: Long): Unit = {
+    zkClient.createPartitionReassignment(topics)
+  }
+
+  override def alterReplicaLogDirs(topics: Map[TopicPartitionReplica, String], timeoutMs: Long): Unit = {
+    throw new AdminCommandFailedException("bootstrap-server needs to be provided in order to reassign replica log directory")
+  }
+
+  override def getReplicaAssignmentForTopics(topics: immutable.Set[String]): Map[TopicPartition, Seq[Int]] = zkClient.getReplicaAssignmentForTopics(topics)
+
+  override def reassignInProgress: Boolean = zkClient.reassignPartitionsInProgress
+
+  override def getOngoingReassignments: Map[TopicPartition, Seq[Int]] = zkClient.getPartitionReassignment
+
+  override def close() : Unit = zkClient.close()
+}
+
 object ReassignPartitionsCommand extends Logging {
 
   case class Throttle(interBrokerLimit: Long, replicaAlterLogDirsLimit: Long = -1, postUpdateAction: () => Unit = () => ())
